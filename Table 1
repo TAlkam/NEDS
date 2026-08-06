@@ -1,0 +1,815 @@
+# =============================================================================
+# TABLE 1
+# Demographic and socioeconomic characteristics of Alzheimer’s disease
+# emergency department encounters by age group, NEDS 2022
+#
+# Study file:
+# NEDS_2022_Core Alzheimers only.dta
+#
+# Notes:
+# - Overall analytic cohort: N = 125,461 AD-associated ED encounters
+# - Age is missing for 8 encounters.
+# - These 8 encounters remain in the overall cohort but are not assigned
+#   to an age stratum.
+# - Categorical percentages use the TOTAL number of encounters in each
+#   column as the denominator, including missing observations.
+# - Homelessness is identified from ICD-10-CM Z59.0x diagnosis codes.
+# =============================================================================
+
+import os
+import re
+import numpy as np
+import pandas as pd
+from IPython.display import display
+
+
+# =============================================================================
+# 1. LOAD DATA
+# =============================================================================
+
+file_path = "/content/NEDS_2022_Core Alzheimers only.dta"
+
+# Optional upload step for Google Colab
+if not os.path.exists(file_path):
+    from google.colab import files
+
+    print("Please upload: NEDS_2022_Core Alzheimers only.dta")
+    uploaded = files.upload()
+
+    dta_files = [
+        filename
+        for filename in uploaded.keys()
+        if filename.lower().endswith(".dta")
+    ]
+
+    if len(dta_files) == 0:
+        raise FileNotFoundError("No Stata .dta file was uploaded.")
+
+    file_path = "/content/" + dta_files[0]
+
+
+print("Loading:", file_path)
+
+df = pd.read_stata(
+    file_path,
+    convert_categoricals=False
+)
+
+# Standardize variable names
+df.columns = [c.lower() for c in df.columns]
+
+print(f"Dataset loaded: {df.shape[0]:,} ED encounters")
+print(f"Number of variables: {df.shape[1]:,}")
+
+
+# =============================================================================
+# 2. VERIFY REQUIRED VARIABLES
+# =============================================================================
+
+required_variables = [
+    "age",
+    "female",
+    "race",
+    "pay1",
+    "zipinc_qrtl",
+    "pl_nchs"
+]
+
+missing_variables = [
+    variable
+    for variable in required_variables
+    if variable not in df.columns
+]
+
+if missing_variables:
+    raise KeyError(
+        f"Required variables not found: {missing_variables}"
+    )
+
+print("\nRequired demographic variables confirmed.")
+
+
+# =============================================================================
+# 3. CREATE AGE GROUPS
+# =============================================================================
+#
+# Eight encounters have missing age.
+# They are retained in the overall cohort but will have age_group4 = missing.
+#
+# Age groups used in the manuscript:
+# 60–64
+# 65–74
+# 75–84
+# ≥85
+# =============================================================================
+
+df["age_group4"] = pd.cut(
+    df["age"],
+    bins=[59, 64, 74, 84, np.inf],
+    labels=[
+        "60–64",
+        "65–74",
+        "75–84",
+        "≥85"
+    ],
+    right=True
+)
+
+print("\nAge-group distribution:")
+print(
+    df["age_group4"]
+    .value_counts(sort=False, dropna=False)
+)
+
+print(
+    f"\nMissing age: "
+    f"{df['age'].isna().sum():,}"
+)
+
+
+# =============================================================================
+# 4. VERIFY AGE-GROUP COUNTS
+# =============================================================================
+
+expected_age_counts = {
+    "60–64": 2784,
+    "65–74": 18512,
+    "75–84": 51440,
+    "≥85": 52717
+}
+
+actual_age_counts = (
+    df["age_group4"]
+    .value_counts(sort=False)
+    .to_dict()
+)
+
+print("\nAge-group count verification:")
+
+for group, expected in expected_age_counts.items():
+    actual = int(actual_age_counts.get(group, 0))
+
+    print(
+        f"{group}: "
+        f"actual = {actual:,}, "
+        f"expected = {expected:,}"
+    )
+
+print(
+    "\nEncounters assigned to an age group:",
+    f"{df['age_group4'].notna().sum():,}"
+)
+
+print(
+    "Overall cohort:",
+    f"{len(df):,}"
+)
+
+
+# =============================================================================
+# 5. IDENTIFY ICD-10-CM DIAGNOSIS VARIABLES
+# =============================================================================
+
+dx_cols = [
+    c
+    for c in df.columns
+    if re.fullmatch(r"i10_dx\d+", c)
+]
+
+# Sort numerically:
+# i10_dx1, i10_dx2, ..., i10_dx40
+dx_cols = sorted(
+    dx_cols,
+    key=lambda x: int(
+        re.search(r"\d+$", x).group()
+    )
+)
+
+print(
+    f"\nNumber of diagnosis fields detected: "
+    f"{len(dx_cols)}"
+)
+
+if dx_cols:
+    print(
+        "Diagnosis fields:",
+        dx_cols[0],
+        "through",
+        dx_cols[-1]
+    )
+
+
+# =============================================================================
+# 6. DERIVE DOCUMENTED HOMELESSNESS
+# =============================================================================
+#
+# 2022 ICD-10-CM homelessness codes include:
+#
+# Z59.00  Homelessness unspecified
+# Z59.01  Sheltered homelessness
+# Z59.02  Unsheltered homelessness
+#
+# HCUP diagnosis codes are commonly stored without decimal points:
+#
+# Z5900
+# Z5901
+# Z5902
+#
+# We therefore identify any diagnosis beginning with Z590.
+# =============================================================================
+
+homeless = pd.Series(
+    False,
+    index=df.index
+)
+
+for col in dx_cols:
+
+    cleaned_dx = (
+        df[col]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+        .str.strip()
+        .str.replace(".", "", regex=False)
+    )
+
+    homeless = (
+        homeless |
+        cleaned_dx.str.startswith("Z590")
+    )
+
+df["homeless"] = homeless.astype(int)
+
+n_homeless = int(df["homeless"].sum())
+pct_homeless = (
+    100 * n_homeless / len(df)
+)
+
+print("\nDocumented homelessness:")
+print(f"n = {n_homeless:,}")
+print(f"Percent = {pct_homeless:.3f}%")
+
+
+# =============================================================================
+# 7. CATEGORY LABELS
+# =============================================================================
+#
+# HCUP RACE is a combined race/ethnicity variable.
+# =============================================================================
+
+sex_labels = {
+    0: "Male",
+    1: "Female"
+}
+
+race_labels = {
+    1: "White",
+    2: "Black",
+    3: "Hispanic",
+    4: "Asian/Pacific Islander",
+    5: "Native American",
+    6: "Other"
+}
+
+payer_labels = {
+    1: "Medicare",
+    2: "Medicaid",
+    3: "Private insurance",
+    4: "Self-pay",
+    5: "No charge",
+    6: "Other"
+}
+
+income_labels = {
+    1: "Quartile 1 (lowest)",
+    2: "Quartile 2",
+    3: "Quartile 3",
+    4: "Quartile 4 (highest)"
+}
+
+residence_labels = {
+    1: "Large central metropolitan",
+    2: "Large fringe metropolitan",
+    3: "Medium metropolitan",
+    4: "Small metropolitan",
+    5: "Micropolitan",
+    6: "Noncore"
+}
+
+
+# =============================================================================
+# 8. DEFINE TABLE COLUMNS
+# =============================================================================
+
+groups = [
+    (
+        "Overall AD cohort",
+        df
+    ),
+    (
+        "60–64",
+        df[df["age_group4"] == "60–64"]
+    ),
+    (
+        "65–74",
+        df[df["age_group4"] == "65–74"]
+    ),
+    (
+        "75–84",
+        df[df["age_group4"] == "75–84"]
+    ),
+    (
+        "≥85",
+        df[df["age_group4"] == "≥85"]
+    )
+]
+
+
+# =============================================================================
+# 9. FORMATTING FUNCTIONS
+# =============================================================================
+
+def format_percentage(pct):
+    """
+    Publication-style percentage formatting.
+    """
+
+    if pct == 0:
+        return "0.0"
+
+    if pct < 0.01:
+        return "<0.01"
+
+    if pct < 0.1:
+        return "<0.1"
+
+    return f"{pct:.1f}"
+
+
+def n_pct(data, variable, value):
+    """
+    Return n (%) using the entire group as the denominator.
+
+    Missing observations therefore remain part of the denominator.
+    """
+
+    denominator = len(data)
+
+    if denominator == 0:
+        return "0 (0.0)"
+
+    n = int(
+        (data[variable] == value).sum()
+    )
+
+    pct = (
+        100 * n / denominator
+    )
+
+    return (
+        f"{n:,} "
+        f"({format_percentage(pct)})"
+    )
+
+
+def missing_n_pct(data, variable):
+    """
+    Return missing n (%) using the entire group as denominator.
+    """
+
+    denominator = len(data)
+
+    if denominator == 0:
+        return "0 (0.0)"
+
+    n = int(
+        data[variable]
+        .isna()
+        .sum()
+    )
+
+    pct = (
+        100 * n / denominator
+    )
+
+    return (
+        f"{n:,} "
+        f"({format_percentage(pct)})"
+    )
+
+
+def yes_n_pct(data, variable):
+    """
+    Return n (%) for value = 1 in a binary variable.
+    """
+
+    denominator = len(data)
+
+    if denominator == 0:
+        return "0 (0.0)"
+
+    n = int(
+        (data[variable] == 1).sum()
+    )
+
+    pct = (
+        100 * n / denominator
+    )
+
+    return (
+        f"{n:,} "
+        f"({format_percentage(pct)})"
+    )
+
+
+def mean_sd(data, variable):
+    """
+    Return mean ± SD using available observations.
+    """
+
+    x = pd.to_numeric(
+        data[variable],
+        errors="coerce"
+    ).dropna()
+
+    if len(x) == 0:
+        return "—"
+
+    return (
+        f"{x.mean():.1f} ± "
+        f"{x.std(ddof=1):.1f}"
+    )
+
+
+# =============================================================================
+# 10. BUILD TABLE 1
+# =============================================================================
+
+rows = []
+
+
+def add_row(
+    characteristic,
+    category,
+    function
+):
+    """
+    Add one row to Table 1.
+    """
+
+    row = {
+        "Characteristic": characteristic,
+        "Category": category
+    }
+
+    for group_name, group_data in groups:
+        row[group_name] = function(group_data)
+
+    rows.append(row)
+
+
+# -----------------------------------------------------------------------------
+# Study population
+# -----------------------------------------------------------------------------
+
+add_row(
+    "Study population",
+    "ED encounters, n",
+    lambda x: f"{len(x):,}"
+)
+
+
+# -----------------------------------------------------------------------------
+# Age
+# -----------------------------------------------------------------------------
+
+add_row(
+    "Age",
+    "Mean ± SD, years",
+    lambda x: mean_sd(
+        x,
+        "age"
+    )
+)
+
+# Missing-age row:
+# Missing age applies to the overall cohort only because encounters with
+# missing age cannot belong to an age stratum.
+
+age_missing_row = {
+    "Characteristic": "Age",
+    "Category": "Missing",
+    "Overall AD cohort": missing_n_pct(
+        df,
+        "age"
+    ),
+    "60–64": "—",
+    "65–74": "—",
+    "75–84": "—",
+    "≥85": "—"
+}
+
+rows.append(age_missing_row)
+
+
+# -----------------------------------------------------------------------------
+# Sex
+# -----------------------------------------------------------------------------
+
+for value, label in sex_labels.items():
+
+    add_row(
+        "Sex",
+        label,
+        lambda x, v=value: n_pct(
+            x,
+            "female",
+            v
+        )
+    )
+
+add_row(
+    "Sex",
+    "Missing",
+    lambda x: missing_n_pct(
+        x,
+        "female"
+    )
+)
+
+
+# -----------------------------------------------------------------------------
+# Race/ethnicity
+# -----------------------------------------------------------------------------
+
+for value, label in race_labels.items():
+
+    add_row(
+        "Race/ethnicity",
+        label,
+        lambda x, v=value: n_pct(
+            x,
+            "race",
+            v
+        )
+    )
+
+add_row(
+    "Race/ethnicity",
+    "Missing",
+    lambda x: missing_n_pct(
+        x,
+        "race"
+    )
+)
+
+
+# -----------------------------------------------------------------------------
+# Primary payer
+# -----------------------------------------------------------------------------
+
+for value, label in payer_labels.items():
+
+    add_row(
+        "Primary payer",
+        label,
+        lambda x, v=value: n_pct(
+            x,
+            "pay1",
+            v
+        )
+    )
+
+add_row(
+    "Primary payer",
+    "Missing",
+    lambda x: missing_n_pct(
+        x,
+        "pay1"
+    )
+)
+
+
+# -----------------------------------------------------------------------------
+# ZIP-code median household income quartile
+# -----------------------------------------------------------------------------
+
+for value, label in income_labels.items():
+
+    add_row(
+        "ZIP-code median household income",
+        label,
+        lambda x, v=value: n_pct(
+            x,
+            "zipinc_qrtl",
+            v
+        )
+    )
+
+add_row(
+    "ZIP-code median household income",
+    "Missing",
+    lambda x: missing_n_pct(
+        x,
+        "zipinc_qrtl"
+    )
+)
+
+
+# -----------------------------------------------------------------------------
+# Patient residence
+# -----------------------------------------------------------------------------
+
+for value, label in residence_labels.items():
+
+    add_row(
+        "Patient residence",
+        label,
+        lambda x, v=value: n_pct(
+            x,
+            "pl_nchs",
+            v
+        )
+    )
+
+add_row(
+    "Patient residence",
+    "Missing",
+    lambda x: missing_n_pct(
+        x,
+        "pl_nchs"
+    )
+)
+
+
+# -----------------------------------------------------------------------------
+# Housing status
+# -----------------------------------------------------------------------------
+
+add_row(
+    "Housing status",
+    "ICD-10-CM-documented homelessness",
+    lambda x: yes_n_pct(
+        x,
+        "homeless"
+    )
+)
+
+
+# Convert rows to DataFrame
+table1 = pd.DataFrame(rows)
+
+
+# =============================================================================
+# 11. DISPLAY TABLE
+# =============================================================================
+
+print(
+    "\nTable 1. Demographic and socioeconomic characteristics "
+    "of Alzheimer’s disease emergency department encounters "
+    "by age group, NEDS 2022\n"
+)
+
+display(table1)
+
+
+# =============================================================================
+# 12. VALIDATE IMPORTANT COUNTS
+# =============================================================================
+
+print("\nValidation checks")
+
+print(
+    "Overall cohort:",
+    f"{len(df):,}"
+)
+
+print(
+    "Age available:",
+    f"{df['age'].notna().sum():,}"
+)
+
+print(
+    "Age missing:",
+    f"{df['age'].isna().sum():,}"
+)
+
+print(
+    "60–64:",
+    f"{(df['age_group4'] == '60–64').sum():,}"
+)
+
+print(
+    "65–74:",
+    f"{(df['age_group4'] == '65–74').sum():,}"
+)
+
+print(
+    "75–84:",
+    f"{(df['age_group4'] == '75–84').sum():,}"
+)
+
+print(
+    "≥85:",
+    f"{(df['age_group4'] == '≥85').sum():,}"
+)
+
+print(
+    "Female:",
+    f"{(df['female'] == 1).sum():,}"
+)
+
+print(
+    "Male:",
+    f"{(df['female'] == 0).sum():,}"
+)
+
+print(
+    "Documented homelessness:",
+    f"{df['homeless'].sum():,}"
+)
+
+
+# =============================================================================
+# 13. EXPORT TABLE
+# =============================================================================
+
+excel_path = (
+    "/content/"
+    "Table_1_AD_Demographic_Socioeconomic_Characteristics.xlsx"
+)
+
+csv_path = (
+    "/content/"
+    "Table_1_AD_Demographic_Socioeconomic_Characteristics.csv"
+)
+
+table1.to_excel(
+    excel_path,
+    index=False
+)
+
+table1.to_csv(
+    csv_path,
+    index=False
+)
+
+print("\nFiles saved:")
+print(excel_path)
+print(csv_path)
+
+
+# =============================================================================
+# 14. OPTIONAL: SAVE A MARKDOWN VERSION FOR GITHUB
+# =============================================================================
+
+markdown_path = (
+    "/content/"
+    "Table_1_AD_Demographic_Socioeconomic_Characteristics.md"
+)
+
+with open(
+    markdown_path,
+    "w",
+    encoding="utf-8"
+) as f:
+
+    f.write(
+        "# Table 1\n\n"
+    )
+
+    f.write(
+        "**Demographic and socioeconomic characteristics of "
+        "Alzheimer’s disease emergency department encounters "
+        "by age group, NEDS 2022**\n\n"
+    )
+
+    f.write(
+        table1.to_markdown(
+            index=False
+        )
+    )
+
+    f.write(
+        "\n\n"
+        "**Note:** Values represent unweighted characteristics "
+        "of the analytic cohort and are presented as n (%) unless "
+        "otherwise indicated. Percentages were calculated using "
+        "the total number of encounters in each column as the "
+        "denominator. Eight encounters had missing age and were "
+        "included in the overall cohort but could not be assigned "
+        "to an age stratum. Race/ethnicity represents the HCUP "
+        "combined race/ethnicity variable. ZIP-code median household "
+        "income quartile reflects the estimated median household "
+        "income of the patient's residential ZIP code. Homelessness "
+        "was identified from ICD-10-CM Z59.0x diagnosis codes and "
+        "therefore represents documented homelessness rather than "
+        "a directly collected housing-status measure. Percentages "
+        "may not total 100% because of rounding. AD, Alzheimer's "
+        "disease; ED, emergency department; HCUP, Healthcare Cost "
+        "and Utilization Project; NEDS, Nationwide Emergency "
+        "Department Sample; SD, standard deviation.\n"
+    )
+
+print(markdown_path)
